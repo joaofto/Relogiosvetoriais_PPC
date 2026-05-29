@@ -58,8 +58,7 @@ pthread_cond_t condEmpty;
  * produtores lentos
  * consumidores rápidos
  */
-
-#define FILA_CHEIA
+#define FILA_VAZIA
 
 /* ================= FUNÇÕES AUXILIARES ================= */
 
@@ -143,22 +142,22 @@ void submitTask(Task task) {
 void *producerThread(void *args) {
 
     long id = (long) args;
+    
+    Clock localClock = {{0, 0, 0}};
 
-    int localClock = 0;
 
     while (1) {
 
         Task t;
 
+    
         t.producerId = id;
 
-        /* Simulação de relógio vetorial */
+        /* Atualiza o relógio vetorial local */
+        localClock.p[id]++;
 
-        t.clock.p[0] = 0;
-        t.clock.p[1] = 0;
-        t.clock.p[2] = 0;
-
-        t.clock.p[id] = ++localClock;
+        /* Copia o relógio para a tarefa */
+        t.clock = localClock;
 
         printf("[Produtor %ld] produziu relógio -> ", id);
 
