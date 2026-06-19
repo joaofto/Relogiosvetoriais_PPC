@@ -1,130 +1,170 @@
-#include <stdio.h>
-#include <mpi.h>
+/*
+ * ============================================================
+ * ETAPA 3 - PARTE 1
+ * Estruturas de dados e filas produtor/consumidor
+ * ============================================================
+ */
 
-typedef struct Clock {
-    int p[3];
-} Clock;
+#include <pthread.h>
 
+#define BUFFER_SIZE 5
 
-#define TAG_B   1
-#define TAG_H   2
-#define TAG_DM  3
-#define TAG_LE  4
-#define TAG_FJ  5
+/* ============================================================
+ * ESTRUTURA DA MENSAGEM
+ * ============================================================
+ */
 
-void PrintClock(const char *evento, Clock *clock) {
-    int pid;
-    MPI_Comm_rank(MPI_COMM_WORLD, &pid);
-    printf("P%d - %s -> (%d,%d,%d)\n",
-           pid, evento, clock->p[0], clock->p[1], clock->p[2]);
-    fflush(stdout);
-}
+typedef struct {
+    Clock clock;
+    int origem;
+    int destino;
+    int tag;
+} Message;
 
+/* ============================================================
+ * ESTRUTURA DA FILA
+ * ============================================================
+ */
 
-void InternalEvent(Clock *clock, const char *label) {
-    int pid;
-    MPI_Comm_rank(MPI_COMM_WORLD, &pid);
+typedef struct {
 
-    clock->p[pid]++;
-    PrintClock(label, clock);
-}
+    Message buffer[BUFFER_SIZE];
 
+    int inicio;
+    int fim;
+    int quantidade;
 
-void SendEvent(int dest, Clock *clock, const char *label, int tag) {
-    MPI_Send(clock->p, 3, MPI_INT, dest, tag, MPI_COMM_WORLD);
-    PrintClock(label, clock);
-}
+    pthread_mutex_t mutex;
+    pthread_cond_t notEmpty;
+    pthread_cond_t notFull;
 
+} Queue;
 
-void ReceiveEvent(int src, Clock *clock, const char *label, int tag) {
-    int pid;
-    MPI_Comm_rank(MPI_COMM_WORLD, &pid);
+/* ============================================================
+ * FILA DE RECEPÇÃO
+ * ============================================================
+ */
 
-    int received[3];
+Queue receiveQueue = {
+    .inicio = 0,
+    .fim = 0,
+    .quantidade = 0,
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .notEmpty = PTHREAD_COND_INITIALIZER,
+    .notFull = PTHREAD_COND_INITIALIZER
+};
 
-    MPI_Recv(received, 3, MPI_INT, src, tag, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+/* ============================================================
+ * FILA DE ENVIO
+ * ============================================================
+ */
 
-    printf("P%d - Recebendo de P%d: (%d,%d,%d) - antes: (%d,%d,%d)\n", 
-           pid, src, received[0], received[1], received[2], 
-           clock->p[0], clock->p[1], clock->p[2]);
-    fflush(stdout);
+Queue sendQueue = {
+    .inicio = 0,
+    .fim = 0,
+    .quantidade = 0,
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .notEmpty = PTHREAD_COND_INITIALIZER,
+    .notFull = PTHREAD_COND_INITIALIZER
+};
 
-    for (int i = 0; i < 3; i++) {
-        if (received[i] > clock->p[i]) {
-            clock->p[i] = received[i];
-        }
+/* ============================================================
+ * ENQUEUE (INSERE EM UMA FILA)
+ * ============================================================
+ */
+
+void enqueue(Queue *queue, Message msg)
+{
+    pthread_mutex_lock(&queue->mutex);
+
+    while(queue->quantidade == BUFFER_SIZE)
+    {
+        pthread_cond_wait(&queue->notFull, &queue->mutex);
     }
 
-    clock->p[pid]++;
-    PrintClock(label, clock);
+    queue->buffer[queue->fim] = msg;
+
+    queue->fim = (queue->fim + 1) % BUFFER_SIZE;
+
+    queue->quantidade++;
+
+    pthread_cond_signal(&queue->notEmpty);
+
+    pthread_mutex_unlock(&queue->mutex);
 }
 
-/* ================= PROCESSOS ================= */
+/* ============================================================
+ * DEQUEUE (REMOVE DA FILA)
+ * ============================================================
+ */
 
-void process0() {
-    Clock clock = {{0,0,0}};
+Message dequeue(Queue *queue)
+{
+    pthread_mutex_lock(&queue->mutex);
 
-    InternalEvent(&clock, "a");                 
+    while(queue->quantidade == 0)
+    {
+        pthread_cond_wait(&queue->notEmpty, &queue->mutex);
+    }
 
-    SendEvent(1, &clock, "b", TAG_B);           
+    Message msg = queue->buffer[queue->inicio];
 
-    ReceiveEvent(1, &clock, "c", TAG_H);        
+    queue->inicio = (queue->inicio + 1) % BUFFER_SIZE;
 
-    InternalEvent(&clock, "d");                
+    queue->quantidade--;
 
-    SendEvent(2, &clock, "d->m", TAG_DM);       
+    pthread_cond_signal(&queue->notFull);
 
-    ReceiveEvent(2, &clock, "e", TAG_LE);       
+    pthread_mutex_unlock(&queue->mutex);
 
-    InternalEvent(&clock, "f");                 
-
-    SendEvent(1, &clock, "f->j", TAG_FJ);       
-
-    InternalEvent(&clock, "g");                 
+    return msg;
 }
 
-void process1() {
-    Clock clock = {{0,0,0}};
+/* ============================================================
+ * OPERAÇÕES DA FILA DE ENVIO
+ * ============================================================
+ */
 
-    SendEvent(0, &clock, "h", TAG_H);           
-
-    ReceiveEvent(0, &clock, "i", TAG_B);        
-
-    ReceiveEvent(0, &clock, "j", TAG_FJ);       
+void enqueueSend(Message msg)
+{
+    enqueue(&sendQueue, msg);
 }
 
-void process2() {
-    Clock clock = {{0,0,0}};
-
-    InternalEvent(&clock, "k");                 
-
-    InternalEvent(&clock, "l");                 
-
-    ReceiveEvent(0, &clock, "m", TAG_DM);      
-
-    SendEvent(0, &clock, "l->e", TAG_LE);      
+Message dequeueSend()
+{
+    return dequeue(&sendQueue);
 }
 
-/* ================= MAIN ================= */
+/* ============================================================
+ * OPERAÇÕES DA FILA DE RECEPÇÃO
+ * ============================================================
+ */
 
-int main(void) {
-    int my_rank;
+void enqueueReceive(Message msg)
+{
+    enqueue(&receiveQueue, msg);
+}
 
-    MPI_Init(NULL, NULL);
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+Message dequeueReceive()
+{
+    return dequeue(&receiveQueue);
+}
 
-    MPI_Barrier(MPI_COMM_WORLD);
+/* ============================================================
+ * FUNÇÃO AUXILIAR PARA DEPURAÇÃO
+ * ============================================================
+ */
 
-    printf("Processo %d iniciado\n", my_rank);
+void printMessage(Message *msg)
+{
+    printf("Origem: %d | Destino: %d | TAG: %d | Clock=(%d,%d,%d)\n",
+           msg->origem,
+           msg->destino,
+           msg->tag,
+           msg->clock.p[0],
+           msg->clock.p[1],
+           msg->clock.p[2]);
+
     fflush(stdout);
-
-    if (my_rank == 0)
-        process0();
-    else if (my_rank == 1)
-        process1();
-    else if (my_rank == 2)
-        process2();
-
-    MPI_Finalize();
-    return 0;
 }
+
